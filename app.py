@@ -1,7 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 import os
-import re
 import io
 from dotenv import load_dotenv
 
@@ -21,23 +20,17 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-# Auto-select a Gemini text model
-models = genai.list_models()
-text_models = [m.name for m in models if "gemini" in m.name.lower()]
+def get_gemini_model():
+    models = genai.list_models()
+    text_models = [m.name for m in models if "gemini" in m.name.lower()]
+    if not text_models:
+        st.error("No Gemini text-generation models available for your API key.")
+        st.stop()
+    model_name = text_models[0]
+    st.info(f"Using Gemini model: {model_name}")
+    return genai.GenerativeModel(model_name)
 
-if not text_models:
-    st.error("No Gemini text-generation models available for your API key.")
-    st.stop()
-
-model_name = text_models[0]  # pick the first available
-st.info(f"Using Gemini model: {model_name}")
-model = genai.GenerativeModel(model_name)
-
-# -----------------------------
-# STREAMLIT PAGE CONFIG
-# -----------------------------
-st.set_page_config(page_title="Fast AI Quiz Generator (Gemini)", layout="wide")
-st.title("⚡ Fast AI Quiz Generator (Gemini Version)")
+model = get_gemini_model()
 
 # -----------------------------
 # UTILS
@@ -64,35 +57,29 @@ def extract_text_from_file(uploaded_file):
         return ""
 
 def generate_summary(text, max_sentences=5):
-    """Simple extractive summary"""
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    return " ".join(sentences[:max_sentences])
+    sentences = text.split('. ')
+    return ". ".join(sentences[:max_sentences])
 
 def extract_keywords(text, max_keywords=8):
+    import re
     text = re.sub(r"[^a-zA-Z0-9 ]", " ", text.lower())
     words = text.split()
-
     stopwords = {
         "the","is","and","in","of","to","a","on","for","as","by","with","an",
         "it","this","that","are","be","or","from","at","was","were","you","your"
     }
-
     freq = {}
     for w in words:
         if w not in stopwords and len(w) > 3:
             freq[w] = freq.get(w, 0) + 1
-
     keywords = sorted(freq, key=freq.get, reverse=True)
     return keywords[:max_keywords]
 
 def has_enough_context(text, min_length=300):
-    """Check if text contains enough content for direct question generation."""
     return len(text.strip()) >= min_length
 
-# -----------------------------
-# QUESTION GENERATION USING GEMINI
-# -----------------------------
-def generate_questions(prompt, n=5, difficulty="easy"):
+def generate_csv_quiz(prompt):
+    """Generate quiz CSV directly using Gemini"""
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -102,86 +89,75 @@ def generate_questions(prompt, n=5, difficulty="easy"):
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.subheader("Upload your study material or paste text")
-uploaded_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"])
-text_input = st.text_area("Or paste text here...", height=200)
+def main():
+    st.set_page_config(page_title="Fast AI Quiz Generator (Gemini)", layout="wide")
+    st.title("⚡ Fast AI Quiz Generator (Gemini Version)")
 
-text_data = ""
-if uploaded_file:
-    text_data = extract_text_from_file(uploaded_file)
-elif text_input.strip():
-    text_data = text_input.strip()
+    st.subheader("Upload your study material or paste text")
+    uploaded_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"])
+    text_input = st.text_area("Or paste text here...", height=200)
 
-if text_data:
+    text_data = ""
+    if uploaded_file:
+        text_data = extract_text_from_file(uploaded_file)
+    elif text_input.strip():
+        text_data = text_input.strip()
+
+    if not text_data:
+        st.info("Paste some text or upload a PDF/TXT to generate summary and quiz.")
+        return
+
+    # Show summary
     st.subheader("Summary")
     summary = generate_summary(text_data)
     st.write(summary)
 
+    # Quiz settings
     st.subheader("Quiz Settings")
     num_questions = st.slider("Questions per topic", 1, 15, 5)
     difficulty = st.selectbox("Difficulty level", ["easy", "medium", "hard"])
 
     if st.button("Generate Quiz ⚡"):
+        st.subheader("Generated Quiz (CSV format)")
 
-        st.subheader("Generated Quiz")
-
-        # --------------------------
-        # DECISION: Enough context?
-        # --------------------------
         if has_enough_context(text_data):
-            st.info("📘 Context detected — generating questions directly from the document.")
-
-            prompt = f"""
-Use ONLY the content below to generate {num_questions} MCQs:
-
-{text_data}
-
-Difficulty: {difficulty}
-
-Requirements:
-- Each question must be based ONLY on the provided text
-- Use 4 options (A-D)
-- Provide the correct answer at the end
-"""
-            with st.spinner("Generating MCQs from the document context..."):
-                quiz = generate_questions(prompt, num_questions, difficulty)
-
-            st.markdown(quiz)
-            full_quiz_text = quiz
-
+            st.info("📘 Context detected — generating questions from the document.")
+            content_source = text_data
         else:
-            st.warning("⚠ Not enough context found — generating questions using extracted keywords.")
-
-            with st.spinner("Extracting keywords..."):
-                keywords = extract_keywords(text_data)
+            st.warning("⚠ Not enough context — generating questions using keywords.")
+            keywords = extract_keywords(text_data)
             st.success(f"Keywords found: {', '.join(keywords)}")
+            content_source = ", ".join(keywords)
 
-            combined_topic = ", ".join(keywords)
+        # Gemini prompt for CSV output
+        prompt = f"""
+Generate {num_questions} multiple-choice questions in CSV format with columns:
+question_num,question,option_a,option_b,option_c,option_d,correct_option
 
-            prompt = f"""
-Generate {num_questions} multiple-choice questions on:
-{combined_topic}
+Use ONLY the following content for question generation:
+{content_source}
 
 Difficulty: {difficulty}
 
 Requirements:
-- 4 options per question (A–D)
-- Mention correct answer at the end
+- 4 options per question (A, B, C, D)
+- correct_option must be A, B, C, or D
+- Provide exactly {num_questions} questions
+- Output the CSV text exactly as it should appear in the file
 """
-            with st.spinner("Generating questions using keywords..."):
-                quiz = generate_questions(prompt, num_questions, difficulty)
+        with st.spinner("Generating CSV quiz..."):
+            csv_quiz = generate_csv_quiz(prompt)
 
-            st.markdown(f"### Topics: {combined_topic}")
-            st.markdown(quiz)
-            full_quiz_text = quiz
+        # Show raw CSV
+        st.text_area("CSV Output Preview", csv_quiz, height=300)
 
-        # Download file
+        # Download CSV file
         st.download_button(
-            "Download Quiz File",
-            data=full_quiz_text,
-            file_name="quiz.txt",
-            mime="text/plain"
+            "Download Quiz CSV",
+            data=csv_quiz,
+            file_name="quiz.csv",
+            mime="text/csv"
         )
 
-else:
-    st.info("Paste some text or upload a PDF/TXT to generate summary and quiz.")
+if __name__ == "__main__":
+    main()
