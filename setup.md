@@ -1,0 +1,1 @@
+Get-ChildItem C:\,D:\,E:\,F:\,G:\ -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Autodesk|ArtCAM' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
